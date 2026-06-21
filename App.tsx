@@ -1,13 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   LayoutChangeEvent,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  useWindowDimensions,
+  TextInput,
   View,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import { useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 
@@ -17,6 +19,11 @@ type SecurityTopic = {
   android: string;
   ios: string;
   risk: 'Niski' | 'Srednji' | 'Visoki';
+};
+
+type AuthCredentials = {
+  username: string;
+  password: string;
 };
 
 const topics: SecurityTopic[] = [
@@ -61,9 +68,221 @@ const quizItems = [
   },
 ];
 
+const SESSION_STORAGE_KEY = 'testapp.activeSession';
+const HISTORY_STORAGE_KEY = 'testapp.credentialsHistory';
+
 export default function App() {
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [savedCredentials, setSavedCredentials] = useState<AuthCredentials | null>(null);
+  const [credentialsHistory, setCredentialsHistory] = useState<AuthCredentials[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadCredentials = async () => {
+      try {
+        const [storedSession, storedHistory] = await Promise.all([
+          AsyncStorage.getItem(SESSION_STORAGE_KEY),
+          AsyncStorage.getItem(HISTORY_STORAGE_KEY),
+        ]);
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (storedHistory) {
+          const parsedHistory = JSON.parse(storedHistory) as AuthCredentials[];
+          if (Array.isArray(parsedHistory)) {
+            setCredentialsHistory(parsedHistory);
+            if (parsedHistory.length > 0) {
+              console.table(parsedHistory);
+            }
+          }
+        }
+
+        if (storedSession) {
+          const parsedCredentials = JSON.parse(storedSession) as AuthCredentials;
+          if (parsedCredentials.username && parsedCredentials.password) {
+            setSavedCredentials(parsedCredentials);
+            setIsAuthenticated(true);
+          }
+        }
+      } catch {
+        await Promise.all([
+          AsyncStorage.removeItem(SESSION_STORAGE_KEY),
+          AsyncStorage.removeItem(HISTORY_STORAGE_KEY),
+        ]);
+      } finally {
+        if (isMounted) {
+          setIsBootstrapping(false);
+        }
+      }
+    };
+
+    void loadCredentials();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const handleLogin = async (credentials: AuthCredentials) => {
+    const normalizedCredentials = {
+      username: credentials.username.trim(),
+      password: credentials.password,
+    };
+
+    const updatedHistory = [...credentialsHistory, normalizedCredentials];
+
+    console.table(updatedHistory);
+
+    await Promise.all([
+      AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(normalizedCredentials)),
+      AsyncStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory)),
+    ]);
+
+    setSavedCredentials(normalizedCredentials);
+    setCredentialsHistory(updatedHistory);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = async () => {
+    await AsyncStorage.removeItem(SESSION_STORAGE_KEY);
+    setSavedCredentials(null);
+    setIsAuthenticated(false);
+  };
+
+  if (isBootstrapping) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#007AFF" />
+        <Text style={styles.loadingText}>Učitavanje prijave...</Text>
+        <StatusBar style="light" />
+      </View>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginScreen onLogin={handleLogin} credentialsHistory={credentialsHistory} />;
+  }
+
+  return (
+    <AuthenticatedScreen
+      username={savedCredentials?.username ?? 'Korisnik'}
+      onLogout={handleLogout}
+      credentialsHistory={credentialsHistory}
+    />
+  );
+}
+
+function LoginScreen({
+  onLogin,
+  credentialsHistory,
+}: {
+  onLogin: (credentials: AuthCredentials) => Promise<void>;
+  credentialsHistory: AuthCredentials[];
+}) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    const trimmedUsername = username.trim();
+
+    if (!trimmedUsername || !password.trim()) {
+      setErrorMessage('Unesi korisničko ime i lozinku.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setErrorMessage('');
+
+    try {
+      await onLogin({ username: trimmedUsername, password });
+    } catch {
+      setErrorMessage('Ne mogu spremiti prijavu. Pokušaj ponovno.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <View style={styles.loginContainer}>
+      <StatusBar style="light" />
+      <View style={styles.loginCard}>
+        <Text style={styles.loginEyebrow}>Jednostavan lokalni login</Text>
+        <Text style={styles.loginTitle}>Prijava</Text>
+        <Text style={styles.loginDescription}>
+          Dobrodošli! Unesite svoje korisničko ime i lozinku da biste pristupili aplikaciji.
+        </Text>
+
+        <Text style={styles.inputLabel}>Korisničko ime</Text>
+        <TextInput
+          value={username}
+          onChangeText={setUsername}
+          placeholder="npr. ivan"
+          placeholderTextColor="#7E8794"
+          autoCapitalize="none"
+          autoCorrect={false}
+          style={styles.textInput}
+          returnKeyType="next"
+        />
+
+        <Text style={styles.inputLabel}>Lozinka</Text>
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="upiši lozinku"
+          placeholderTextColor="#7E8794"
+          secureTextEntry
+          style={styles.textInput}
+          returnKeyType="done"
+          onSubmitEditing={handleSubmit}
+        />
+
+        {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+
+        <Pressable
+          style={[styles.button, isSubmitting && styles.buttonDisabled]}
+          onPress={handleSubmit}
+          disabled={isSubmitting}
+        >
+          <Text style={styles.buttonText}>
+            {isSubmitting ? 'Spremanje...' : 'Prijavi se'}
+          </Text>
+        </Pressable>
+
+        <View style={styles.credentialsCard}>
+          <Text style={styles.credentialsTitle}>Prijave na ovom uređaju</Text>
+          {credentialsHistory.length === 0 ? (
+            <Text style={styles.credentialsEmpty}>Još nema spremljenih prijava.</Text>
+          ) : (
+            credentialsHistory.map((entry, index) => (
+              <View key={`${entry.username}-${index}`} style={styles.credentialsRow}>
+                <Text style={styles.credentialsText}>
+                  {index + 1}. {entry.username} / {entry.password}
+                </Text>
+              </View>
+            ))
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function AuthenticatedScreen({
+  username,
+  onLogout,
+  credentialsHistory,
+}: {
+  username: string;
+  onLogout: () => Promise<void>;
+  credentialsHistory: AuthCredentials[];
+}) {
   const scrollRef = useRef<ScrollView | null>(null);
-  const { width } = useWindowDimensions();
   const [positions, setPositions] = useState<{ [key: string]: number }>({});
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
@@ -72,14 +291,17 @@ export default function App() {
   const [microphonePermission, requestMicrophonePermission] = useMicrophonePermissions();
 
   useEffect(() => {
-    if (!cameraPermission?.granted) requestCameraPermission();
-    if (!microphonePermission?.granted) requestMicrophonePermission();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!cameraPermission?.granted) {
+      void requestCameraPermission();
+    }
+    if (!microphonePermission?.granted) {
+      void requestMicrophonePermission();
+    }
+  }, [cameraPermission?.granted, microphonePermission?.granted, requestCameraPermission, requestMicrophonePermission]);
 
   const onSectionLayout = (key: string) => (e: LayoutChangeEvent) => {
     const y = e.nativeEvent.layout.y;
-    setPositions((p) => ({ ...p, [key]: y }));
+    setPositions((currentPositions) => ({ ...currentPositions, [key]: y }));
   };
 
   const scrollTo = (key: string) => {
@@ -104,8 +326,17 @@ export default function App() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Sigurnost Mobilnih Aplikacija</Text>
-        <Text style={styles.subtitle}>Android vs iOS</Text>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.title}>Sigurnost Mobilnih Aplikacija</Text>
+            <Text style={styles.subtitle}>Android vs iOS</Text>
+          </View>
+
+          <Pressable style={styles.logoutButton} onPress={onLogout}>
+            <Text style={styles.logoutButtonText}>Odjava</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.loggedInText}>Prijavljen kao {username}</Text>
       </View>
 
       <View style={styles.tabs}>
@@ -289,6 +520,25 @@ export default function App() {
             </View>
           ))}
         </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Spremljene prijave</Text>
+          <Text style={styles.description}>
+            Ovdje vidiš sve korisnike i lozinke koje su se prijavile na ovom uređaju.
+          </Text>
+          {credentialsHistory.length === 0 ? (
+            <Text style={styles.credentialsEmpty}>Još nema spremljenih prijava.</Text>
+          ) : (
+            credentialsHistory.map((entry, index) => (
+              <View key={`${entry.username}-${index}`} style={styles.credentialsCard}>
+                <Text style={styles.credentialsText}>
+                  {index + 1}. {entry.username}
+                </Text>
+                <Text style={styles.credentialsText}>Šifra: {entry.password}</Text>
+              </View>
+            ))
+          )}
+        </View>
       </ScrollView>
 
       <StatusBar style="auto" />
@@ -297,6 +547,49 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: '#0F1419',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  loadingText: { color: '#D3D9E3', fontSize: 16, fontWeight: '600' },
+  loginContainer: {
+    flex: 1,
+    backgroundColor: '#0F1419',
+    padding: 20,
+    justifyContent: 'center',
+  },
+  loginCard: {
+    backgroundColor: '#1A1E27',
+    borderRadius: 18,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#2A2E37',
+  },
+  loginEyebrow: { color: '#7BA7FF', fontSize: 12, fontWeight: '700', marginBottom: 8 },
+  loginTitle: { fontSize: 30, fontWeight: '800', color: '#FFF', marginBottom: 8 },
+  loginDescription: {
+    fontSize: 14,
+    color: '#BBB',
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  inputLabel: { color: '#D3D9E3', fontSize: 13, fontWeight: '700', marginBottom: 8 },
+  textInput: {
+    backgroundColor: '#252A33',
+    color: '#FFF',
+    borderWidth: 1,
+    borderColor: '#2A2E37',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+    fontSize: 15,
+  },
+  errorText: { color: '#FF8B8B', fontSize: 13, marginBottom: 12, fontWeight: '600' },
+  buttonDisabled: { opacity: 0.7 },
   container: { flex: 1, backgroundColor: '#0F1419' },
   header: {
     backgroundColor: '#1A1E27',
@@ -304,8 +597,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 40,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
   title: { fontSize: 24, fontWeight: '800', color: '#FFF', marginBottom: 4 },
   subtitle: { fontSize: 14, color: '#AAA' },
+  loggedInText: { marginTop: 10, fontSize: 12, color: '#8F98A6', fontWeight: '600' },
+  logoutButton: {
+    backgroundColor: '#252A33',
+    borderWidth: 1,
+    borderColor: '#343A44',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+  },
+  logoutButtonText: { color: '#FFF', fontWeight: '700', fontSize: 13 },
   tabs: {
     flexDirection: 'row',
     backgroundColor: '#1A1E27',
@@ -407,4 +716,25 @@ const styles = StyleSheet.create({
   },
   explanationText: { fontWeight: '700', fontSize: 13, marginBottom: 4 },
   explanationDetail: { fontSize: 12, color: '#CCC', lineHeight: 18 },
+  credentialsCard: {
+    backgroundColor: '#1A1E27',
+    borderRadius: 10,
+    padding: 14,
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: '#2A2E37',
+  },
+  credentialsTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#FFF',
+    marginBottom: 8,
+  },
+  credentialsRow: {
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#2A2E37',
+  },
+  credentialsText: { color: '#D3D9E3', fontSize: 13, fontWeight: '600' },
+  credentialsEmpty: { color: '#AAA', fontSize: 13, fontStyle: 'italic' },
 });
